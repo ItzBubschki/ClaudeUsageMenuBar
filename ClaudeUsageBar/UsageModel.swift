@@ -10,6 +10,8 @@ class UsageModel: ObservableObject {
     @Published var lastError: String?
 
     private var refreshTimer: AnyCancellable?
+    private var rateLimitRetryTask: DispatchWorkItem?
+    private var consecutiveRateLimits: Int = 0
     private static let apiSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         return URLSession(configuration: config, delegate: APISessionDelegate(), delegateQueue: nil)
@@ -81,9 +83,12 @@ class UsageModel: ObservableObject {
                 }
 
                 if httpResponse.statusCode == 429 {
-                    self?.lastError = "Rate limited, will retry"
+                    self?.handleRateLimit(retryAfterHeader: httpResponse.value(forHTTPHeaderField: "Retry-After"))
                     return
                 }
+
+                // Reset backoff on successful non-429 response
+                self?.consecutiveRateLimits = 0
 
                 guard (200...299).contains(httpResponse.statusCode) else {
                     self?.lastError = "HTTP \(httpResponse.statusCode)"
@@ -107,6 +112,29 @@ class UsageModel: ObservableObject {
                 }
             }
         }.resume()
+    }
+
+    /// Handles a 429 response with exponential backoff, respecting Retry-After if present.
+    private func handleRateLimit(retryAfterHeader: String?) {
+        consecutiveRateLimits += 1
+
+        // Use Retry-After header if present (seconds), otherwise exponential backoff
+        let delay: TimeInterval
+        if let retryAfter = retryAfterHeader, let seconds = TimeInterval(retryAfter) {
+            delay = min(seconds, 600) // Cap at 10 minutes
+        } else {
+            // Exponential backoff: 30s, 60s, 120s, 240s, capped at 600s
+            delay = min(30.0 * pow(2.0, Double(consecutiveRateLimits - 1)), 600)
+        }
+
+        lastError = "Rate limited, retrying in \(Int(delay))s"
+
+        rateLimitRetryTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            self?.fetchUsage()
+        }
+        rateLimitRetryTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
     /// Reads the OAuth token from the macOS Keychain using Security.framework.

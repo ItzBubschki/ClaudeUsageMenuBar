@@ -31,7 +31,7 @@
 - [x] **Validate HTTP response status codes**
   The app only checks for `429`. It doesn't validate that the response is `200` before parsing. Add a check that the status code is `2xx` before processing the response body.
 
-- [ ] **Implement rate limit backoff**
+- [x] **Implement rate limit backoff**
   On a `429`, the app shows "Rate limited, will retry" and waits for the next 120s timer tick. It doesn't read `Retry-After` headers or implement exponential backoff, which could lead to repeated rate limiting.
 
 - [ ] **Remove force-unwrapped URL**

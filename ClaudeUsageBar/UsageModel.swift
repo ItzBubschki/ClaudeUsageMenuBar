@@ -10,6 +10,10 @@ class UsageModel: ObservableObject {
     @Published var lastError: String?
 
     private var refreshTimer: AnyCancellable?
+    private static let apiSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        return URLSession(configuration: config, delegate: APISessionDelegate(), delegateQueue: nil)
+    }()
 
     var resetTimeFormatted: String {
         Self.formatMinutes(resetTimeMinutes)
@@ -59,7 +63,7 @@ class UsageModel: ObservableObject {
         // Zero out the auth value after setting the header
         authValue.resetBytes(in: 0..<authValue.count)
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        Self.apiSession.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
                     self?.lastError = error.localizedDescription
@@ -162,5 +166,21 @@ struct UsageWindow: Decodable {
     enum CodingKeys: String, CodingKey {
         case utilization
         case resetsAt = "resets_at"
+    }
+}
+
+// MARK: - Session Delegate (redirect protection)
+
+/// Blocks redirects to prevent the Authorization header from being forwarded to a different host.
+class APISessionDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // Reject all redirects — the Anthropic API should not redirect
+        completionHandler(nil)
     }
 }

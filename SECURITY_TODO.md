@@ -20,12 +20,12 @@
 - [x] **Minimize OAuth token lifetime in memory**
   The token is fetched as a plain `String`, passed into a `URLRequest`, and then falls out of scope with no explicit zeroing. Swift strings are immutable and can be copied by the runtime, so the token may linger in memory. Consider using `Data` instead of `String` where possible (easier to zero out) and minimizing how long the token is held.
 
-- [ ] **Add certificate pinning for the Anthropic API**
+- [ ] **Add certificate pinning for the Anthropic API** *(skipped — overkill for this app)*
   The app trusts any TLS certificate the system trust store accepts for `api.anthropic.com`. If a user is on a corporate network with a MITM proxy (or has a compromised CA in their trust store), the OAuth token would be sent to the proxy. Certificate pinning or public key pinning would mitigate this.
 
 ## Low Priority
 
-- [ ] **Add a redirect policy to prevent token leakage**
+- [x] **Add a redirect policy to prevent token leakage**
   `URLSession` follows redirects by default and forwards the `Authorization` header to the redirect target. A DNS hijack causing a `301` could silently send the bearer token to a different host. Implement a `URLSessionTaskDelegate` to intercept redirects and strip or block auth headers on redirect.
 
 - [ ] **Validate HTTP response status codes**

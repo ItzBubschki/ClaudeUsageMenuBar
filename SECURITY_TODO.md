@@ -5,7 +5,7 @@
 - [x] **Enable App Sandbox**
   The app has no entitlements file and no sandbox configuration. It runs with full user-level access to the filesystem, network, and all user processes. Enable App Sandbox and request only the specific entitlements needed (`com.apple.security.network.client` and keychain access). This is industry standard for macOS apps handling credentials.
 
-- [ ] **Enable Hardened Runtime**
+- [x] **Enable Hardened Runtime**
   `ENABLE_HARDENED_RUNTIME` is not set. Hardened Runtime protects against code injection, DYLIB hijacking, and debugging attacks. Without it, a malicious actor could inject a dylib into the process and exfiltrate the OAuth token from memory.
 
 ## Medium Priority

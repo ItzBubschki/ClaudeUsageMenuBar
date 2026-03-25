@@ -55,7 +55,12 @@ class UsageModel: ObservableObject {
         // Zero out the raw token data
         tokenData.resetBytes(in: 0..<tokenData.count)
 
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+        guard let apiURL = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
+            DispatchQueue.main.async { self.lastError = "Invalid API URL" }
+            return
+        }
+
+        var request = URLRequest(url: apiURL)
         request.httpMethod = "GET"
         request.setValue(String(data: authValue, encoding: .utf8), forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

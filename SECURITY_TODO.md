@@ -34,5 +34,5 @@
 - [x] **Implement rate limit backoff**
   On a `429`, the app shows "Rate limited, will retry" and waits for the next 120s timer tick. It doesn't read `Retry-After` headers or implement exponential backoff, which could lead to repeated rate limiting.
 
-- [ ] **Remove force-unwrapped URL**
+- [x] **Remove force-unwrapped URL**
   `URL(string: "https://api.anthropic.com/api/oauth/usage")!` is safe since it's a hardcoded valid URL, but replacing the force-unwrap with a guard is better code hygiene.

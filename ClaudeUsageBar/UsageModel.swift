@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Security
 
 class UsageModel: ObservableObject {
     @Published var usagePercent: Double = 0.0        // 0–100 (5h window)
@@ -84,27 +85,22 @@ class UsageModel: ObservableObject {
         }.resume()
     }
 
-    /// Reads the OAuth token from the macOS Keychain via the `security` CLI.
-    /// macOS will show a consent dialog the first time.
+    /// Reads the OAuth token from the macOS Keychain using Security.framework.
     private static func getOAuthToken() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
+        guard status == errSecSuccess, let data = result as? Data else {
             return nil
         }
 
-        guard process.terminationStatus == 0 else { return nil }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard !raw.isEmpty,

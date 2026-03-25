@@ -10,7 +10,7 @@
 
 ## Medium Priority
 
-- [ ] **Replace `security` CLI with Security.framework (`SecItemCopyMatching`)**
+- [x] **Replace `security` CLI with Security.framework (`SecItemCopyMatching`)**
   The app shells out to `/usr/bin/security` via `Process()` to read the OAuth token from the Keychain. This is unconventional. Downsides:
   - The token passes through a pipe (another process boundary), briefly visible in memory of both processes.
   - The command and its arguments are visible via `ps` to other user-level processes during execution.

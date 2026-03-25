@@ -10,8 +10,27 @@ xcuserdata/
 *.perspectivev3
 *.xccheckout
 *.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
 
 # macOS
 .DS_Store
 .AppleDouble
 .LSOverride
+._*
+
+# Firebase
+firebase-debug.log
+.firebase/
+
+# Claude Code
+.claude/
+
+# Secrets / credentials
+*.env
+*.pem
+*.p12
+*.key
+*.keystore

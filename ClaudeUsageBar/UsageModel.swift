@@ -75,8 +75,18 @@ class UsageModel: ObservableObject {
                     return
                 }
 
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 429 {
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self?.lastError = "Invalid response"
+                    return
+                }
+
+                if httpResponse.statusCode == 429 {
                     self?.lastError = "Rate limited, will retry"
+                    return
+                }
+
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    self?.lastError = "HTTP \(httpResponse.statusCode)"
                     return
                 }
 

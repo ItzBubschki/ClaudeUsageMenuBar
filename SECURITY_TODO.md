@@ -28,7 +28,7 @@
 - [x] **Add a redirect policy to prevent token leakage**
   `URLSession` follows redirects by default and forwards the `Authorization` header to the redirect target. A DNS hijack causing a `301` could silently send the bearer token to a different host. Implement a `URLSessionTaskDelegate` to intercept redirects and strip or block auth headers on redirect.
 
-- [ ] **Validate HTTP response status codes**
+- [x] **Validate HTTP response status codes**
   The app only checks for `429`. It doesn't validate that the response is `200` before parsing. Add a check that the status code is `2xx` before processing the response body.
 
 - [ ] **Implement rate limit backoff**

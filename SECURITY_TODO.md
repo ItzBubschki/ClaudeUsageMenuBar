@@ -17,7 +17,7 @@
   - The `security` CLI may prompt the user or behave differently across macOS versions.
   Using the native `Security.framework` API (`SecItemCopyMatching`) would be more secure and idiomatic.
 
-- [ ] **Minimize OAuth token lifetime in memory**
+- [x] **Minimize OAuth token lifetime in memory**
   The token is fetched as a plain `String`, passed into a `URLRequest`, and then falls out of scope with no explicit zeroing. Swift strings are immutable and can be copied by the runtime, so the token may linger in memory. Consider using `Data` instead of `String` where possible (easier to zero out) and minimizing how long the token is held.
 
 - [ ] **Add certificate pinning for the Anthropic API**

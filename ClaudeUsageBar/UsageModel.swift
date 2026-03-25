@@ -35,19 +35,29 @@ class UsageModel: ObservableObject {
     }
 
     func fetchUsage() {
-        guard let token = Self.getOAuthToken() else {
+        guard var tokenData = Self.getOAuthTokenData() else {
             DispatchQueue.main.async {
                 self.lastError = "Could not read token from Keychain"
             }
             return
         }
 
+        // Build the Authorization header value as Data: "Bearer " + token
+        var authValue = Data("Bearer ".utf8)
+        authValue.append(tokenData)
+
+        // Zero out the raw token data
+        tokenData.resetBytes(in: 0..<tokenData.count)
+
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(String(data: authValue, encoding: .utf8), forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Zero out the auth value after setting the header
+        authValue.resetBytes(in: 0..<authValue.count)
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -86,7 +96,8 @@ class UsageModel: ObservableObject {
     }
 
     /// Reads the OAuth token from the macOS Keychain using Security.framework.
-    private static func getOAuthToken() -> String? {
+    /// Returns the token as Data to minimize String copies in memory.
+    private static func getOAuthTokenData() -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -110,13 +121,15 @@ class UsageModel: ObservableObject {
         }
 
         // Direct: {"accessToken": "..."}
-        if let token = json["accessToken"] as? String { return token }
+        if let token = json["accessToken"] as? String {
+            return Data(token.utf8)
+        }
 
         // Nested: {"someKey": {"accessToken": "..."}}
         for (_, value) in json {
             if let nested = value as? [String: Any],
                let token = nested["accessToken"] as? String {
-                return token
+                return Data(token.utf8)
             }
         }
 

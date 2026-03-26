@@ -35,7 +35,7 @@ class UsageModel: ObservableObject {
 
     init() {
         fetchUsage()
-        refreshTimer = Timer.publish(every: 120, on: .main, in: .common)
+        refreshTimer = Timer.publish(every: 300, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in self?.fetchUsage() }
     }
@@ -106,12 +106,18 @@ class UsageModel: ObservableObject {
 
                     self?.usagePercent = usage.fiveHour.utilization
 
-                    let resetDate = usage.fiveHour.resetsAt
-                    self?.resetTimeMinutes = max(0, Int(resetDate.timeIntervalSinceNow / 60))
+                    if let resetDate = usage.fiveHour.resetsAt {
+                        self?.resetTimeMinutes = max(0, Int(resetDate.timeIntervalSinceNow / 60))
+                    } else {
+                        self?.resetTimeMinutes = 300 // 5 hours
+                    }
 
                     self?.weeklyUsagePercent = usage.sevenDay.utilization
-                    let weeklyResetDate = usage.sevenDay.resetsAt
-                    self?.weeklyResetTimeMinutes = max(0, Int(weeklyResetDate.timeIntervalSinceNow / 60))
+                    if let weeklyResetDate = usage.sevenDay.resetsAt {
+                        self?.weeklyResetTimeMinutes = max(0, Int(weeklyResetDate.timeIntervalSinceNow / 60))
+                    } else {
+                        self?.weeklyResetTimeMinutes = 0
+                    }
                 } catch {
                     self?.lastError = "Failed to parse usage data"
                 }
@@ -204,7 +210,7 @@ struct UsageResponse: Decodable {
 
 struct UsageWindow: Decodable {
     let utilization: Double
-    let resetsAt: Date
+    let resetsAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case utilization

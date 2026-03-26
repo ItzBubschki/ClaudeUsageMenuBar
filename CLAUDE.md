@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-macOS menu bar app (SwiftUI, macOS 14+) that displays Claude Code session usage. It reads the OAuth token from the macOS Keychain (`Claude Code-credentials`) and polls `https://api.anthropic.com/api/oauth/usage` every 2 minutes to show 5-hour and 7-day usage windows.
+macOS menu bar app (SwiftUI, macOS 14+) that displays Claude Code session usage. It reads the OAuth token from the macOS Keychain (`Claude Code-credentials`) and polls `https://api.anthropic.com/api/oauth/usage` every 5 minutes to show 5-hour and 7-day usage windows.
 
 Runs as a menu-bar-only app (no dock icon) using `MenuBarExtra` with `.window` style.
 
@@ -21,7 +21,7 @@ xcodebuild -project ClaudeUsageBar.xcodeproj -scheme ClaudeUsageBar build
 Four Swift files in `ClaudeUsageBar/`:
 
 - **ClaudeUsageBarApp.swift** — App entry point. Sets up `MenuBarExtra` with a composited NSImage label and a popover window. `MenuBarImageView` re-renders on model changes and a 60s timer.
-- **UsageModel.swift** — `ObservableObject` that owns all state. Fetches usage via URLSession, parses `UsageResponse`/`UsageWindow` (ISO 8601 dates, snake_case keys). Reads OAuth token by shelling out to `/usr/bin/security find-generic-password`. Refreshes every 120s.
+- **UsageModel.swift** — `ObservableObject` that owns all state. Fetches usage via URLSession, parses `UsageResponse`/`UsageWindow` (ISO 8601 dates, snake_case keys). Reads OAuth token by shelling out to `/usr/bin/security find-generic-password`. Refreshes every 300s.
 - **MenuBarLabel.swift** — `BarChartView` (SwiftUI) rendered to `CGImage` via `ImageRenderer`, then composited with the `ClaudeTray` asset into a single template `NSImage` for the menu bar.
 - **UsagePopoverView.swift** — Click-to-open popover showing both usage windows with progress bars, reset countdowns, error display, and a quit button.
 

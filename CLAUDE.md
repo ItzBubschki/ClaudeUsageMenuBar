@@ -12,8 +12,10 @@ Runs as a menu-bar-only app (no dock icon) using `MenuBarExtra` with `.window` s
 
 Open `ClaudeUsageBar.xcodeproj` in Xcode and build with Cmd+R. No package manager dependencies.
 
+For distributable release builds (universal binary, ad-hoc signed):
+
 ```
-xcodebuild -project ClaudeUsageBar.xcodeproj -scheme ClaudeUsageBar build
+xcodebuild -project ClaudeUsageBar.xcodeproj -scheme ClaudeUsageBar -configuration Release ONLY_ACTIVE_ARCH=NO ARCHS="arm64 x86_64" CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
 ```
 
 ## Architecture
@@ -30,11 +32,14 @@ Four Swift files in `ClaudeUsageBar/`:
 The app is installed at `/Applications/ClaudeUsageBar.app` and set to launch at login. After making changes, rebuild and copy the updated app:
 
 ```
-xcodebuild -scheme ClaudeUsageBar -configuration Debug build
-cp -R ~/Library/Developer/Xcode/DerivedData/ClaudeUsageBar-*/Build/Products/Debug/ClaudeUsageBar.app /Applications/ClaudeUsageBar.app
+xcodebuild -project ClaudeUsageBar.xcodeproj -scheme ClaudeUsageBar -configuration Release ONLY_ACTIVE_ARCH=NO ARCHS="arm64 x86_64" CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
+pkill -x ClaudeUsageBar; rm -rf /Applications/ClaudeUsageBar.app
+cp -R ~/Library/Developer/Xcode/DerivedData/ClaudeUsageBar-*/Build/Products/Release/ClaudeUsageBar.app /Applications/ClaudeUsageBar.app
 ```
 
-Then restart: `pkill -x ClaudeUsageBar; open /Applications/ClaudeUsageBar.app`
+**Important:** Always remove the old `/Applications/ClaudeUsageBar.app` before copying the new build. Using `cp -R` over an existing `.app` can leave stale nested files inside the bundle.
+
+Then restart: `open /Applications/ClaudeUsageBar.app`
 
 Do this whenever you've made meaningful changes that the user should see (bug fixes, UI tweaks, new features).
 

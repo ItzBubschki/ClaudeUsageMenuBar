@@ -184,28 +184,23 @@ class UsageModel: ObservableObject {
             return nil
         }
 
-        // Decrypt Electron safeStorage v10 format: "v10" + 12-byte nonce + ciphertext + 16-byte GCM tag
-        guard encryptedData.count > 31, // 3 (prefix) + 12 (nonce) + 16 (tag) minimum
-              encryptedData[0] == 0x76, encryptedData[1] == 0x31, encryptedData[2] == 0x30 else { // "v10"
+        // Verify Electron safeStorage v10 format: "v10" prefix
+        guard encryptedData.count > 19,
+              encryptedData[0] == 0x76, encryptedData[1] == 0x31, encryptedData[2] == 0x30 else {
             return nil
         }
 
-        let nonce = encryptedData[3..<15]
-        let ciphertextAndTag = encryptedData[15...]
-        let tagStart = ciphertextAndTag.count - 16
-        let ciphertext = ciphertextAndTag[ciphertextAndTag.startIndex..<ciphertextAndTag.startIndex.advanced(by: tagStart)]
-        let tag = ciphertextAndTag[ciphertextAndTag.startIndex.advanced(by: tagStart)...]
+        // Skip the "v10" prefix (3 bytes), rest is ciphertext
+        let ciphertext = encryptedData[3...]
 
-        // Derive AES key from the encryption key using PBKDF2 (Chromium/Electron convention)
-        guard let aesKey = deriveKey(password: encryptionKey, salt: Data("saltysalt".utf8), iterations: 1003, keyLength: 16) else {
+        // Derive AES key using PBKDF2-SHA1 (Chromium convention)
+        guard let keyString = String(data: encryptionKey, encoding: .utf8),
+              let aesKey = deriveKey(password: Data(keyString.utf8), salt: Data("saltysalt".utf8), iterations: 1003, keyLength: 16) else {
             return nil
         }
 
-        // Decrypt using AES-128-CBC (Chromium v10 on macOS uses CBC, not GCM)
-        // Actually, Electron safeStorage on macOS uses the key directly with AES-CBC
-        // The "tag" is actually part of the ciphertext in CBC mode with PKCS7 padding
-        let fullCiphertext = Data(ciphertextAndTag)
-        guard let decrypted = decryptAESCBC(key: aesKey, iv: Data(repeating: 0x20, count: 16), data: fullCiphertext) else {
+        // Decrypt using AES-128-CBC with space-filled IV (Chromium v10 on macOS)
+        guard let decrypted = decryptAESCBC(key: aesKey, iv: Data(repeating: 0x20, count: 16), data: Data(ciphertext)) else {
             return nil
         }
 

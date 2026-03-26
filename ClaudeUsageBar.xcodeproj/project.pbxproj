@@ -226,7 +226,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.itzbubschki.ClaudeUsageBar;
+				PRODUCT_BUNDLE_IDENTIFIER = com.itzbubschki.ClaudeUsageMenuBar;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -248,7 +248,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.itzbubschki.ClaudeUsageBar;
+				PRODUCT_BUNDLE_IDENTIFIER = com.itzbubschki.ClaudeUsageMenuBar;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

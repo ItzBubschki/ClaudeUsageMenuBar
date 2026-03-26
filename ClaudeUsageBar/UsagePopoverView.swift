@@ -17,6 +17,7 @@ struct UsagePopoverView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
+                .focusable(false)
             }
 
             VStack(alignment: .leading, spacing: 6) {

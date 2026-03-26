@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import Security
+import CommonCrypto
 
 class UsageModel: ObservableObject {
     @Published var usagePercent: Double = 0.0        // 0–100 (5h window)
@@ -148,12 +149,74 @@ class UsageModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
-    /// Reads the OAuth token from the macOS Keychain using Security.framework.
+    /// Reads the OAuth token, trying Claude Code first, then the Claude desktop app as fallback.
     /// Returns the token as Data to minimize String copies in memory.
     private static func getOAuthTokenData() -> Data? {
+        // Try Claude Code credentials first
+        if let token = getClaudeCodeToken() {
+            return token
+        }
+        // Fall back to Claude desktop app
+        return getClaudeDesktopToken()
+    }
+
+    /// Reads the OAuth token from the Claude Code keychain entry.
+    private static func getClaudeCodeToken() -> Data? {
+        guard let data = readKeychainItem(service: "Claude Code-credentials") else {
+            return nil
+        }
+        return extractAccessToken(from: data)
+    }
+
+    /// Reads and decrypts the OAuth token from the Claude desktop app.
+    private static func getClaudeDesktopToken() -> Data? {
+        // Read the encryption key from keychain
+        guard let encryptionKey = readKeychainItem(service: "Claude Safe Storage") else {
+            return nil
+        }
+
+        // Read the encrypted token cache from config.json
+        let configPath = NSHomeDirectory() + "/Library/Application Support/Claude/config.json"
+        guard let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
+              let tokenCacheB64 = config["oauth:tokenCache"] as? String,
+              let encryptedData = Data(base64Encoded: tokenCacheB64) else {
+            return nil
+        }
+
+        // Decrypt Electron safeStorage v10 format: "v10" + 12-byte nonce + ciphertext + 16-byte GCM tag
+        guard encryptedData.count > 31, // 3 (prefix) + 12 (nonce) + 16 (tag) minimum
+              encryptedData[0] == 0x76, encryptedData[1] == 0x31, encryptedData[2] == 0x30 else { // "v10"
+            return nil
+        }
+
+        let nonce = encryptedData[3..<15]
+        let ciphertextAndTag = encryptedData[15...]
+        let tagStart = ciphertextAndTag.count - 16
+        let ciphertext = ciphertextAndTag[ciphertextAndTag.startIndex..<ciphertextAndTag.startIndex.advanced(by: tagStart)]
+        let tag = ciphertextAndTag[ciphertextAndTag.startIndex.advanced(by: tagStart)...]
+
+        // Derive AES key from the encryption key using PBKDF2 (Chromium/Electron convention)
+        guard let aesKey = deriveKey(password: encryptionKey, salt: Data("saltysalt".utf8), iterations: 1003, keyLength: 16) else {
+            return nil
+        }
+
+        // Decrypt using AES-128-CBC (Chromium v10 on macOS uses CBC, not GCM)
+        // Actually, Electron safeStorage on macOS uses the key directly with AES-CBC
+        // The "tag" is actually part of the ciphertext in CBC mode with PKCS7 padding
+        let fullCiphertext = Data(ciphertextAndTag)
+        guard let decrypted = decryptAESCBC(key: aesKey, iv: Data(repeating: 0x20, count: 16), data: fullCiphertext) else {
+            return nil
+        }
+
+        return extractAccessToken(from: decrypted)
+    }
+
+    /// Reads a generic password from the keychain.
+    private static func readKeychainItem(service: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
+            kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -164,7 +227,11 @@ class UsageModel: ObservableObject {
         guard status == errSecSuccess, let data = result as? Data else {
             return nil
         }
+        return data
+    }
 
+    /// Extracts the accessToken from a JSON blob (as Data).
+    private static func extractAccessToken(from data: Data) -> Data? {
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard !raw.isEmpty,
@@ -173,20 +240,83 @@ class UsageModel: ObservableObject {
             return nil
         }
 
-        // Direct: {"accessToken": "..."}
+        // Direct: {"accessToken": "..."} or {"token": "..."}
         if let token = json["accessToken"] as? String {
             return Data(token.utf8)
         }
+        if let token = json["token"] as? String {
+            return Data(token.utf8)
+        }
 
-        // Nested: {"someKey": {"accessToken": "..."}}
-        for (_, value) in json {
-            if let nested = value as? [String: Any],
-               let token = nested["accessToken"] as? String {
-                return Data(token.utf8)
+        // Nested: {"someKey": {"accessToken": "..."}} or {"someKey": {"token": "..."}}
+        // Prefer keys containing "user:profile" scope (needed for the usage API)
+        var fallbackToken: String?
+        for (key, value) in json {
+            if let nested = value as? [String: Any] {
+                if let token = nested["accessToken"] as? String {
+                    if key.contains("user:profile") { return Data(token.utf8) }
+                    fallbackToken = fallbackToken ?? token
+                }
+                if let token = nested["token"] as? String {
+                    if key.contains("user:profile") { return Data(token.utf8) }
+                    fallbackToken = fallbackToken ?? token
+                }
+            }
+        }
+        if let token = fallbackToken { return Data(token.utf8) }
+
+        return nil
+    }
+
+    /// Derives an AES key using PBKDF2-SHA1 (Chromium convention).
+    private static func deriveKey(password: Data, salt: Data, iterations: Int, keyLength: Int) -> Data? {
+        var derivedKey = Data(count: keyLength)
+        let result = derivedKey.withUnsafeMutableBytes { derivedKeyBytes in
+            password.withUnsafeBytes { passwordBytes in
+                salt.withUnsafeBytes { saltBytes in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordBytes.bindMemory(to: Int8.self).baseAddress,
+                        password.count,
+                        saltBytes.bindMemory(to: UInt8.self).baseAddress,
+                        salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                        UInt32(iterations),
+                        derivedKeyBytes.bindMemory(to: UInt8.self).baseAddress,
+                        keyLength
+                    )
+                }
+            }
+        }
+        return result == kCCSuccess ? derivedKey : nil
+    }
+
+    /// Decrypts AES-128-CBC with PKCS7 padding.
+    private static func decryptAESCBC(key: Data, iv: Data, data: Data) -> Data? {
+        let bufferSize = data.count + kCCBlockSizeAES128
+        var outLength = 0
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+
+        let result = data.withUnsafeBytes { dataBytes in
+            key.withUnsafeBytes { keyBytes in
+                iv.withUnsafeBytes { ivBytes in
+                    CCCrypt(
+                        CCOperation(kCCDecrypt),
+                        CCAlgorithm(kCCAlgorithmAES),
+                        CCOptions(kCCOptionPKCS7Padding),
+                        keyBytes.baseAddress, key.count,
+                        ivBytes.baseAddress,
+                        dataBytes.baseAddress, data.count,
+                        buffer, bufferSize,
+                        &outLength
+                    )
+                }
             }
         }
 
-        return nil
+        guard result == kCCSuccess else { return nil }
+        return Data(bytes: buffer, count: outLength)
     }
 }
 

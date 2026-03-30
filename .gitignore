@@ -34,3 +34,9 @@ firebase-debug.log
 *.p12
 *.key
 *.keystore
+
+# Release artifacts
+*.zip
+
+# Superset
+.superset/

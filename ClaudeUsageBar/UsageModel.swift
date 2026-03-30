@@ -9,8 +9,12 @@ class UsageModel: ObservableObject {
     @Published var weeklyUsagePercent: Double = 0.0  // 0–100 (7d window)
     @Published var weeklyResetTimeMinutes: Int = 0   // minutes until 7d reset
     @Published var lastError: String?
+    @Published var isRefreshing: Bool = false
 
+    let updateManager = UpdateManager()
+    private var updateCancellable: AnyCancellable?
     private var refreshTimer: AnyCancellable?
+    private var minimumSpinnerEnd: Date?
     private var rateLimitRetryTask: DispatchWorkItem?
     private var consecutiveRateLimits: Int = 0
     private static let apiSession: URLSession = {
@@ -27,6 +31,10 @@ class UsageModel: ObservableObject {
     }
 
     static func formatMinutes(_ minutes: Int) -> String {
+        if minutes >= 1440 {
+            let d = Double(minutes) / 1440.0
+            return String(format: "%.1fd", d)
+        }
         if minutes >= 60 {
             let h = Double(minutes) / 60.0
             return String(format: "%.1fh", h)
@@ -35,6 +43,8 @@ class UsageModel: ObservableObject {
     }
 
     init() {
+        updateCancellable = updateManager.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
         fetchUsage()
         refreshTimer = Timer.publish(every: 300, on: .main, in: .common)
             .autoconnect()
@@ -42,9 +52,14 @@ class UsageModel: ObservableObject {
     }
 
     func fetchUsage() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        minimumSpinnerEnd = Date().addingTimeInterval(1)
+
         guard var tokenData = Self.getOAuthTokenData() else {
             DispatchQueue.main.async {
                 self.lastError = "Could not read token from Keychain"
+                self.finishRefreshing()
             }
             return
         }
@@ -57,7 +72,10 @@ class UsageModel: ObservableObject {
         tokenData.resetBytes(in: 0..<tokenData.count)
 
         guard let apiURL = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
-            DispatchQueue.main.async { self.lastError = "Invalid API URL" }
+            DispatchQueue.main.async {
+                self.lastError = "Invalid API URL"
+                self.finishRefreshing()
+            }
             return
         }
 
@@ -73,6 +91,8 @@ class UsageModel: ObservableObject {
 
         Self.apiSession.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
+                defer { self?.finishRefreshing() }
+
                 if let error = error {
                     self?.lastError = error.localizedDescription
                     return
@@ -124,6 +144,18 @@ class UsageModel: ObservableObject {
                 }
             }
         }.resume()
+    }
+
+    /// Ensures isRefreshing stays true for at least 2 seconds, then clears it.
+    private func finishRefreshing() {
+        let remaining = (minimumSpinnerEnd ?? Date()).timeIntervalSinceNow
+        if remaining > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
+                self?.isRefreshing = false
+            }
+        } else {
+            isRefreshing = false
+        }
     }
 
     /// Handles a 429 response with exponential backoff, respecting Retry-After if present.

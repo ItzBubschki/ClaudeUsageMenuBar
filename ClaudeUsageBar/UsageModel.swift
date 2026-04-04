@@ -17,6 +17,10 @@ class UsageModel: ObservableObject {
     private var minimumSpinnerEnd: Date?
     private var rateLimitRetryTask: DispatchWorkItem?
     private var consecutiveRateLimits: Int = 0
+
+    private static let cachedTokenService = "ClaudeUsageBar-token"
+    private static let cachedTokenTimestampKey = "tokenCacheTimestamp"
+    private static let tokenCacheMaxAge: TimeInterval = 24 * 3600 // 1 day
     private static let apiSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         return URLSession(configuration: config, delegate: APISessionDelegate(), delegateQueue: nil)
@@ -51,12 +55,12 @@ class UsageModel: ObservableObject {
             .sink { [weak self] _ in self?.fetchUsage() }
     }
 
-    func fetchUsage() {
+    func fetchUsage(forceTokenRefresh: Bool = false) {
         guard !isRefreshing else { return }
         isRefreshing = true
         minimumSpinnerEnd = Date().addingTimeInterval(1)
 
-        guard var tokenData = Self.getOAuthTokenData() else {
+        guard var tokenData = Self.getOAuthTokenData(forceRefresh: forceTokenRefresh) else {
             DispatchQueue.main.async {
                 self.lastError = "Could not read token from Keychain"
                 self.finishRefreshing()
@@ -110,6 +114,17 @@ class UsageModel: ObservableObject {
 
                 if httpResponse.statusCode == 429 {
                     self?.handleRateLimit(retryAfterHeader: httpResponse.value(forHTTPHeaderField: "Retry-After"))
+                    return
+                }
+
+                // On 401/403, invalidate cached token and retry once from source
+                if [401, 403].contains(httpResponse.statusCode) && !forceTokenRefresh {
+                    Self.deleteCachedToken()
+                    self?.finishRefreshing()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        self?.isRefreshing = false
+                        self?.fetchUsage(forceTokenRefresh: true)
+                    }
                     return
                 }
 
@@ -181,15 +196,59 @@ class UsageModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
-    /// Reads the OAuth token, trying Claude Code first, then the Claude desktop app as fallback.
+    /// Reads the OAuth token, using a local cache to avoid repeated Keychain password prompts.
+    /// The cache is refreshed every 7 days or when forceRefresh is true (e.g., after a 401).
     /// Returns the token as Data to minimize String copies in memory.
-    private static func getOAuthTokenData() -> Data? {
-        // Try Claude Code credentials first
-        if let token = getClaudeCodeToken() {
-            return token
+    private static func getOAuthTokenData(forceRefresh: Bool = false) -> Data? {
+        // Check cached token first (unless forced refresh)
+        if !forceRefresh, let cached = readCachedToken(), !isCacheExpired() {
+            return cached
         }
-        // Fall back to Claude desktop app
-        return getClaudeDesktopToken()
+
+        // Read from source (may trigger Keychain password prompt)
+        guard let token = getClaudeCodeToken() ?? getClaudeDesktopToken() else {
+            return nil
+        }
+
+        // Cache it in our own keychain entry (no future prompts for this one)
+        saveCachedToken(token)
+        return token
+    }
+
+    /// Reads the cached token from our own keychain entry.
+    private static func readCachedToken() -> Data? {
+        return readKeychainItem(service: cachedTokenService)
+    }
+
+    /// Saves the token to our own keychain entry.
+    private static func saveCachedToken(_ token: Data) {
+        // Delete existing entry first
+        deleteCachedToken()
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: cachedTokenService,
+            kSecValueData as String: token
+        ]
+        SecItemAdd(query as CFDictionary, nil)
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cachedTokenTimestampKey)
+    }
+
+    /// Deletes the cached token.
+    private static func deleteCachedToken() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: cachedTokenService
+        ]
+        SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: cachedTokenTimestampKey)
+    }
+
+    /// Checks whether the cached token has expired (older than 7 days).
+    private static func isCacheExpired() -> Bool {
+        let timestamp = UserDefaults.standard.double(forKey: cachedTokenTimestampKey)
+        guard timestamp > 0 else { return true }
+        return Date().timeIntervalSince1970 - timestamp > tokenCacheMaxAge
     }
 
     /// Reads the OAuth token from the Claude Code keychain entry.

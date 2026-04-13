@@ -44,11 +44,25 @@ Then restart: `open /Applications/ClaudeUsageBar.app`
 
 Do this whenever you've made meaningful changes that the user should see (bug fixes, UI tweaks, new features).
 
+## Releasing
+
+Use `scripts/release.sh <version>` to cut a release. It bumps both `MARKETING_VERSION` lines, builds the universal Release binary, packages the bundle with `ditto --keepParent` into `dist/ClaudeUsageBar.zip`, commits + pushes the version bump, creates the GitHub release with the zip attached, and redeploys to `/Applications`.
+
+```
+scripts/release.sh 1.5.2                          # opens $EDITOR for release notes
+scripts/release.sh 1.5.2 --notes-file notes.md    # use a prepared notes file
+scripts/release.sh 1.5.2 --notes "Fix ..."        # inline notes
+scripts/release.sh 1.5.2 --no-redeploy            # skip the /Applications copy
+scripts/release.sh 1.5.2 --dry-run                # show what would happen
+```
+
+Pre-flight refuses to run if the working tree is dirty, you're not on `main`, `main` isn't synced with `origin`, or the tag already exists. The `gh release create` step requires `gh auth login` first.
+
 ## Key details
 
 - The menu bar image is a **template image** (`isTemplate = true`) so it adapts to light/dark mode automatically.
 - Token extraction handles both flat (`{"accessToken": "..."}`) and nested JSON structures from the keychain.
 - API requires `anthropic-beta: oauth-2025-04-20` header.
 - Image assets live in `ClaudeUsageBar/Assets.xcassets` (includes `ClaudeTray` for menu bar icon and `ClaudeIcon` for popover).
-- **Version bumps**: When fixing bugs or adding features, always increment `MARKETING_VERSION` in `project.pbxproj` (both Debug and Release configurations). Use semantic versioning (MAJOR.MINOR.PATCH). The auto-update mechanism compares this against GitHub release tags.
-- **Auto-update**: `UpdateManager.swift` checks GitHub releases hourly. GitHub release tags must match the version format (e.g., `1.1` or `v1.1`). Release assets should include a `.zip` file containing the `.app` bundle.
+- **Version bumps**: When fixing bugs or adding features, always increment `MARKETING_VERSION` in `project.pbxproj` (both Debug and Release configurations). Use semantic versioning (MAJOR.MINOR.PATCH). The auto-update mechanism compares this against GitHub release tags. `scripts/release.sh` handles this for you.
+- **Auto-update**: `UpdateManager.swift` checks GitHub releases hourly. GitHub release tags must match the version format (e.g., `1.1` or `v1.1`). Release assets should include a `.zip` file containing the `.app` bundle (use `ditto -c -k --keepParent`, not `zip`, to preserve the bundle).

@@ -37,6 +37,7 @@ firebase-debug.log
 
 # Release artifacts
 *.zip
+dist/
 
 # Superset
 .superset/

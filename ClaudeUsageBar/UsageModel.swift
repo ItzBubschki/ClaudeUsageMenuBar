@@ -52,7 +52,12 @@ class UsageModel: ObservableObject {
         fetchUsage()
         refreshTimer = Timer.publish(every: 300, on: .main, in: .common)
             .autoconnect()
-            .sink { [weak self] _ in self?.fetchUsage() }
+            .sink { [weak self] (_: Date) in
+                // Skip if a rate-limit backoff retry is already scheduled,
+                // otherwise the timer would race the backoff and ratchet it up.
+                guard self?.rateLimitRetryTask == nil else { return }
+                self?.fetchUsage()
+            }
     }
 
     func fetchUsage(forceTokenRefresh: Bool = false) {
@@ -113,6 +118,18 @@ class UsageModel: ObservableObject {
                 }
 
                 if httpResponse.statusCode == 429 {
+                    // First 429 with a possibly-stale cached token: drop the cache and
+                    // retry once with a fresh token. Claude Code rotates the OAuth token
+                    // and the previous one can get rate-limited independently.
+                    if !forceTokenRefresh && self?.consecutiveRateLimits == 0 {
+                        Self.deleteCachedToken()
+                        self?.finishRefreshing()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                            self?.isRefreshing = false
+                            self?.fetchUsage(forceTokenRefresh: true)
+                        }
+                        return
+                    }
                     self?.handleRateLimit(retryAfterHeader: httpResponse.value(forHTTPHeaderField: "Retry-After"))
                     return
                 }
@@ -129,6 +146,8 @@ class UsageModel: ObservableObject {
                 }
 
                 // Reset backoff on successful non-429 response
+                self?.rateLimitRetryTask?.cancel()
+                self?.rateLimitRetryTask = nil
                 self?.consecutiveRateLimits = 0
 
                 guard (200...299).contains(httpResponse.statusCode) else {
@@ -190,6 +209,7 @@ class UsageModel: ObservableObject {
 
         rateLimitRetryTask?.cancel()
         let task = DispatchWorkItem { [weak self] in
+            self?.rateLimitRetryTask = nil
             self?.fetchUsage()
         }
         rateLimitRetryTask = task

@@ -3,6 +3,12 @@ import Combine
 import Security
 import CommonCrypto
 
+/// Holds a token and its optional expiry date extracted from the credential JSON.
+private struct TokenResult {
+    let token: Data
+    let expiresAt: Date?
+}
+
 class UsageModel: ObservableObject {
     @Published var usagePercent: Double = 0.0        // 0–100 (5h window)
     @Published var resetTimeMinutes: Int = 0         // minutes until 5h reset
@@ -19,8 +25,11 @@ class UsageModel: ObservableObject {
     private var consecutiveRateLimits: Int = 0
 
     private static let cachedTokenService = "ClaudeUsageBar-token"
-    private static let cachedTokenTimestampKey = "tokenCacheTimestamp"
-    private static let tokenCacheMaxAge: TimeInterval = 24 * 3600 // 1 day
+    private static let cachedTokenExpiryKey = "tokenExpiryTimestamp"
+    private static let tokenCacheFallbackMaxAge: TimeInterval = 24 * 3600 // 1 day fallback when no expiry is available
+    /// Safety margin: expire the cache slightly before the real token expiry
+    /// to avoid using a token that's about to become invalid.
+    private static let tokenExpiryMargin: TimeInterval = 5 * 60 // 5 minutes
     private static let apiSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         return URLSession(configuration: config, delegate: APISessionDelegate(), delegateQueue: nil)
@@ -217,7 +226,7 @@ class UsageModel: ObservableObject {
     }
 
     /// Reads the OAuth token, using a local cache to avoid repeated Keychain password prompts.
-    /// The cache is refreshed every 7 days or when forceRefresh is true (e.g., after a 401).
+    /// The cache duration matches the token's actual expiry (minus a safety margin).
     /// Returns the token as Data to minimize String copies in memory.
     private static func getOAuthTokenData(forceRefresh: Bool = false) -> Data? {
         // Check cached token first (unless forced refresh)
@@ -226,13 +235,13 @@ class UsageModel: ObservableObject {
         }
 
         // Read from source (may trigger Keychain password prompt)
-        guard let token = getClaudeCodeToken() ?? getClaudeDesktopToken() else {
+        guard let result = getClaudeCodeTokenWithExpiry() ?? getClaudeDesktopTokenWithExpiry() else {
             return nil
         }
 
         // Cache it in our own keychain entry (no future prompts for this one)
-        saveCachedToken(token)
-        return token
+        saveCachedToken(result.token, expiresAt: result.expiresAt)
+        return result.token
     }
 
     /// Reads the cached token from our own keychain entry.
@@ -240,8 +249,8 @@ class UsageModel: ObservableObject {
         return readKeychainItem(service: cachedTokenService)
     }
 
-    /// Saves the token to our own keychain entry.
-    private static func saveCachedToken(_ token: Data) {
+    /// Saves the token to our own keychain entry with its expiry.
+    private static func saveCachedToken(_ token: Data, expiresAt: Date?) {
         // Delete existing entry first
         deleteCachedToken()
 
@@ -251,7 +260,14 @@ class UsageModel: ObservableObject {
             kSecValueData as String: token
         ]
         SecItemAdd(query as CFDictionary, nil)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cachedTokenTimestampKey)
+
+        if let expiresAt = expiresAt {
+            UserDefaults.standard.set(expiresAt.timeIntervalSince1970, forKey: cachedTokenExpiryKey)
+        } else {
+            // No expiry available — store a fallback expiry relative to now
+            let fallbackExpiry = Date().addingTimeInterval(tokenCacheFallbackMaxAge)
+            UserDefaults.standard.set(fallbackExpiry.timeIntervalSince1970, forKey: cachedTokenExpiryKey)
+        }
     }
 
     /// Deletes the cached token.
@@ -261,26 +277,27 @@ class UsageModel: ObservableObject {
             kSecAttrService as String: cachedTokenService
         ]
         SecItemDelete(query as CFDictionary)
-        UserDefaults.standard.removeObject(forKey: cachedTokenTimestampKey)
+        UserDefaults.standard.removeObject(forKey: cachedTokenExpiryKey)
     }
 
-    /// Checks whether the cached token has expired (older than 7 days).
+    /// Checks whether the cached token has expired based on the token's actual expiry.
     private static func isCacheExpired() -> Bool {
-        let timestamp = UserDefaults.standard.double(forKey: cachedTokenTimestampKey)
-        guard timestamp > 0 else { return true }
-        return Date().timeIntervalSince1970 - timestamp > tokenCacheMaxAge
+        let expiryTimestamp = UserDefaults.standard.double(forKey: cachedTokenExpiryKey)
+        guard expiryTimestamp > 0 else { return true }
+        // Expire early by the safety margin to avoid using a nearly-expired token
+        return Date().timeIntervalSince1970 >= expiryTimestamp - tokenExpiryMargin
     }
 
-    /// Reads the OAuth token from the Claude Code keychain entry.
-    private static func getClaudeCodeToken() -> Data? {
+    /// Reads the OAuth token and expiry from the Claude Code keychain entry.
+    private static func getClaudeCodeTokenWithExpiry() -> TokenResult? {
         guard let data = readKeychainItem(service: "Claude Code-credentials") else {
             return nil
         }
-        return extractAccessToken(from: data)
+        return extractAccessTokenWithExpiry(from: data)
     }
 
-    /// Reads and decrypts the OAuth token from the Claude desktop app.
-    private static func getClaudeDesktopToken() -> Data? {
+    /// Reads and decrypts the OAuth token and expiry from the Claude desktop app.
+    private static func getClaudeDesktopTokenWithExpiry() -> TokenResult? {
         // Read the encryption key from keychain
         guard let encryptionKey = readKeychainItem(service: "Claude Safe Storage") else {
             return nil
@@ -315,7 +332,7 @@ class UsageModel: ObservableObject {
             return nil
         }
 
-        return extractAccessToken(from: decrypted)
+        return extractAccessTokenWithExpiry(from: decrypted)
     }
 
     /// Reads a generic password from the keychain.
@@ -336,8 +353,8 @@ class UsageModel: ObservableObject {
         return data
     }
 
-    /// Extracts the accessToken from a JSON blob (as Data).
-    private static func extractAccessToken(from data: Data) -> Data? {
+    /// Extracts the accessToken and optional expiry from a JSON blob (as Data).
+    private static func extractAccessTokenWithExpiry(from data: Data) -> TokenResult? {
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard !raw.isEmpty,
@@ -346,32 +363,92 @@ class UsageModel: ObservableObject {
             return nil
         }
 
-        // Direct: {"accessToken": "..."} or {"token": "..."}
+        // Direct: {"accessToken": "...", "expiresAt": "..."} or {"token": "..."}
         if let token = json["accessToken"] as? String {
-            return Data(token.utf8)
+            let expiry = parseExpiry(from: json)
+            return TokenResult(token: Data(token.utf8), expiresAt: expiry)
         }
         if let token = json["token"] as? String {
-            return Data(token.utf8)
+            let expiry = parseExpiry(from: json)
+            return TokenResult(token: Data(token.utf8), expiresAt: expiry)
         }
 
         // Nested: {"someKey": {"accessToken": "..."}} or {"someKey": {"token": "..."}}
         // Prefer keys containing "user:profile" scope (needed for the usage API)
         var fallbackToken: String?
+        var fallbackExpiry: Date?
         for (key, value) in json {
             if let nested = value as? [String: Any] {
                 if let token = nested["accessToken"] as? String {
-                    if key.contains("user:profile") { return Data(token.utf8) }
-                    fallbackToken = fallbackToken ?? token
+                    if key.contains("user:profile") {
+                        return TokenResult(token: Data(token.utf8), expiresAt: parseExpiry(from: nested))
+                    }
+                    if fallbackToken == nil {
+                        fallbackToken = token
+                        fallbackExpiry = parseExpiry(from: nested)
+                    }
                 }
                 if let token = nested["token"] as? String {
-                    if key.contains("user:profile") { return Data(token.utf8) }
-                    fallbackToken = fallbackToken ?? token
+                    if key.contains("user:profile") {
+                        return TokenResult(token: Data(token.utf8), expiresAt: parseExpiry(from: nested))
+                    }
+                    if fallbackToken == nil {
+                        fallbackToken = token
+                        fallbackExpiry = parseExpiry(from: nested)
+                    }
                 }
             }
         }
-        if let token = fallbackToken { return Data(token.utf8) }
+        if let token = fallbackToken {
+            return TokenResult(token: Data(token.utf8), expiresAt: fallbackExpiry)
+        }
 
         return nil
+    }
+
+    /// Parses an expiry date from a credential JSON dictionary.
+    /// Supports common OAuth field names: expiresAt, expires_at (ISO 8601 strings
+    /// or numeric timestamps in seconds or milliseconds since epoch),
+    /// and expiresIn / expires_in (seconds from now).
+    private static func parseExpiry(from json: [String: Any]) -> Date? {
+        // ISO 8601 date string fields
+        for key in ["expiresAt", "expires_at"] {
+            if let dateString = json[key] as? String {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let date = formatter.date(from: dateString) { return date }
+                // Retry without fractional seconds
+                let basic = ISO8601DateFormatter()
+                basic.formatOptions = [.withInternetDateTime]
+                if let date = basic.date(from: dateString) { return date }
+            }
+            // Also handle numeric timestamps (seconds or milliseconds since epoch)
+            if let timestamp = json[key] as? TimeInterval, timestamp > 0 {
+                return Date(timeIntervalSince1970: normalizeEpoch(timestamp))
+            }
+            if let timestamp = json[key] as? Int, timestamp > 0 {
+                return Date(timeIntervalSince1970: normalizeEpoch(TimeInterval(timestamp)))
+            }
+        }
+
+        // Relative seconds fields
+        for key in ["expiresIn", "expires_in"] {
+            if let seconds = json[key] as? TimeInterval, seconds > 0 {
+                return Date().addingTimeInterval(normalizeEpoch(seconds))
+            }
+            if let seconds = json[key] as? Int, seconds > 0 {
+                return Date().addingTimeInterval(normalizeEpoch(TimeInterval(seconds)))
+            }
+        }
+
+        return nil
+    }
+
+    /// Converts a numeric timestamp to seconds since epoch.
+    /// Values above 10 billion are treated as milliseconds (epoch in ms),
+    /// since a seconds-based epoch won't exceed 10 billion until the year 2286.
+    private static func normalizeEpoch(_ value: TimeInterval) -> TimeInterval {
+        return value > 10_000_000_000 ? value / 1000.0 : value
     }
 
     /// Derives an AES key using PBKDF2-SHA1 (Chromium convention).

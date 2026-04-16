@@ -407,7 +407,8 @@ class UsageModel: ObservableObject {
     }
 
     /// Parses an expiry date from a credential JSON dictionary.
-    /// Supports common OAuth field names: expiresAt, expires_at (ISO 8601 strings),
+    /// Supports common OAuth field names: expiresAt, expires_at (ISO 8601 strings
+    /// or numeric timestamps in seconds or milliseconds since epoch),
     /// and expiresIn / expires_in (seconds from now).
     private static func parseExpiry(from json: [String: Any]) -> Date? {
         // ISO 8601 date string fields
@@ -421,26 +422,33 @@ class UsageModel: ObservableObject {
                 basic.formatOptions = [.withInternetDateTime]
                 if let date = basic.date(from: dateString) { return date }
             }
-            // Also handle numeric timestamps (seconds since epoch)
+            // Also handle numeric timestamps (seconds or milliseconds since epoch)
             if let timestamp = json[key] as? TimeInterval, timestamp > 0 {
-                return Date(timeIntervalSince1970: timestamp)
+                return Date(timeIntervalSince1970: normalizeEpoch(timestamp))
             }
             if let timestamp = json[key] as? Int, timestamp > 0 {
-                return Date(timeIntervalSince1970: TimeInterval(timestamp))
+                return Date(timeIntervalSince1970: normalizeEpoch(TimeInterval(timestamp)))
             }
         }
 
         // Relative seconds fields
         for key in ["expiresIn", "expires_in"] {
             if let seconds = json[key] as? TimeInterval, seconds > 0 {
-                return Date().addingTimeInterval(seconds)
+                return Date().addingTimeInterval(normalizeEpoch(seconds))
             }
             if let seconds = json[key] as? Int, seconds > 0 {
-                return Date().addingTimeInterval(TimeInterval(seconds))
+                return Date().addingTimeInterval(normalizeEpoch(TimeInterval(seconds)))
             }
         }
 
         return nil
+    }
+
+    /// Converts a numeric timestamp to seconds since epoch.
+    /// Values above 10 billion are treated as milliseconds (epoch in ms),
+    /// since a seconds-based epoch won't exceed 10 billion until the year 2286.
+    private static func normalizeEpoch(_ value: TimeInterval) -> TimeInterval {
+        return value > 10_000_000_000 ? value / 1000.0 : value
     }
 
     /// Derives an AES key using PBKDF2-SHA1 (Chromium convention).

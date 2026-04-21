@@ -135,6 +135,11 @@ struct UsagePopoverView: View {
                         .tint(.pink)
                         .controlSize(.small)
                     }
+                } else {
+                    Button("Clear Cache") {
+                        model.clearCachedTokenAndRefresh()
+                    }
+                    .controlSize(.small)
                 }
                 Spacer()
                 Button("Quit") {

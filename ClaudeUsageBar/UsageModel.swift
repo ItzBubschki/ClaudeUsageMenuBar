@@ -270,6 +270,18 @@ class UsageModel: ObservableObject {
         }
     }
 
+    /// Clears the cached token and refreshes usage from source.
+    func clearCachedTokenAndRefresh() {
+        Self.deleteCachedToken()
+        rateLimitRetryTask?.cancel()
+        rateLimitRetryTask = nil
+        consecutiveRateLimits = 0
+        if isRefreshing {
+            isRefreshing = false
+        }
+        fetchUsage(forceTokenRefresh: true)
+    }
+
     /// Deletes the cached token.
     private static func deleteCachedToken() {
         let query: [String: Any] = [

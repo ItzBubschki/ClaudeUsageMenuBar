@@ -42,10 +42,12 @@ struct UsagePopoverView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(model.resetTimeFormatted)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .monospacedDigit()
+                    TimelineView(.periodic(from: .now, by: 60)) { _ in
+                        Text(model.resetTimeFormatted)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .monospacedDigit()
+                    }
                 }
             }
 
@@ -66,10 +68,12 @@ struct UsagePopoverView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(model.weeklyResetTimeFormatted)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .monospacedDigit()
+                    TimelineView(.periodic(from: .now, by: 60)) { _ in
+                        Text(model.weeklyResetTimeFormatted)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .monospacedDigit()
+                    }
                 }
             }
 

@@ -11,15 +11,16 @@ private struct TokenResult {
 
 class UsageModel: ObservableObject {
     @Published var usagePercent: Double = 0.0        // 0–100 (5h window)
-    @Published var resetTimeMinutes: Int = 0         // minutes until 5h reset
+    @Published var fiveHourResetsAt: Date?           // absolute time of 5h reset
     @Published var weeklyUsagePercent: Double = 0.0  // 0–100 (7d window)
-    @Published var weeklyResetTimeMinutes: Int = 0   // minutes until 7d reset
+    @Published var sevenDayResetsAt: Date?           // absolute time of 7d reset
     @Published var lastError: String?
     @Published var isRefreshing: Bool = false
 
     let updateManager = UpdateManager()
     private var updateCancellable: AnyCancellable?
     private var refreshTimer: AnyCancellable?
+    private var resetCheckTimer: AnyCancellable?
     private var minimumSpinnerEnd: Date?
     private var rateLimitRetryTask: DispatchWorkItem?
     private var consecutiveRateLimits: Int = 0
@@ -36,11 +37,16 @@ class UsageModel: ObservableObject {
     }()
 
     var resetTimeFormatted: String {
-        Self.formatMinutes(resetTimeMinutes)
+        Self.formatMinutes(Self.minutesUntil(fiveHourResetsAt))
     }
 
     var weeklyResetTimeFormatted: String {
-        Self.formatMinutes(weeklyResetTimeMinutes)
+        Self.formatMinutes(Self.minutesUntil(sevenDayResetsAt))
+    }
+
+    private static func minutesUntil(_ date: Date?) -> Int {
+        guard let date = date else { return 0 }
+        return max(0, Int(date.timeIntervalSinceNow / 60))
     }
 
     static func formatMinutes(_ minutes: Int) -> String {
@@ -67,6 +73,21 @@ class UsageModel: ObservableObject {
                 guard self?.rateLimitRetryTask == nil else { return }
                 self?.fetchUsage()
             }
+        resetCheckTimer = Timer.publish(every: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.refreshIfWindowReset() }
+    }
+
+    /// If a stored reset date has elapsed, the window has rolled over and our
+    /// cached usage is stale — refresh now instead of waiting for the 5-minute timer.
+    private func refreshIfWindowReset() {
+        guard rateLimitRetryTask == nil, !isRefreshing else { return }
+        let now = Date()
+        let fiveHourExpired = fiveHourResetsAt.map { $0 <= now } ?? false
+        let sevenDayExpired = sevenDayResetsAt.map { $0 <= now } ?? false
+        if fiveHourExpired || sevenDayExpired {
+            fetchUsage()
+        }
     }
 
     func fetchUsage(forceTokenRefresh: Bool = false) {
@@ -170,18 +191,11 @@ class UsageModel: ObservableObject {
 
                     self?.usagePercent = usage.fiveHour.utilization
 
-                    if let resetDate = usage.fiveHour.resetsAt {
-                        self?.resetTimeMinutes = max(0, Int(resetDate.timeIntervalSinceNow / 60))
-                    } else {
-                        self?.resetTimeMinutes = 300 // 5 hours
-                    }
+                    self?.fiveHourResetsAt = usage.fiveHour.resetsAt
+                        ?? Date().addingTimeInterval(5 * 3600)
 
                     self?.weeklyUsagePercent = usage.sevenDay.utilization
-                    if let weeklyResetDate = usage.sevenDay.resetsAt {
-                        self?.weeklyResetTimeMinutes = max(0, Int(weeklyResetDate.timeIntervalSinceNow / 60))
-                    } else {
-                        self?.weeklyResetTimeMinutes = 0
-                    }
+                    self?.sevenDayResetsAt = usage.sevenDay.resetsAt
                 } catch {
                     self?.lastError = "Failed to parse usage data"
                 }

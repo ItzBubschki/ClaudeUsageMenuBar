@@ -202,13 +202,17 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     fi
 fi
 
-# Resolve the actual built .app path instead of globbing DerivedData
-BUILT_PRODUCTS_DIR="$(xcodebuild \
+# Resolve the actual built .app path instead of globbing DerivedData.
+# Capture -showBuildSettings to a file first: piping into `awk ... exit` makes
+# xcodebuild get SIGPIPE, which `set -o pipefail` then bubbles up as exit 141.
+SETTINGS_LOG="$(mktemp -t claudeusagebar-settings)"
+xcodebuild \
     -project ClaudeUsageBar.xcodeproj \
     -scheme "$SCHEME" \
     -configuration Release \
-    -showBuildSettings 2>/dev/null \
-    | awk '/ BUILT_PRODUCTS_DIR = /{print $3; exit}')"
+    -showBuildSettings > "$SETTINGS_LOG" 2>/dev/null
+BUILT_PRODUCTS_DIR="$(awk '/ BUILT_PRODUCTS_DIR = /{print $3; exit}' "$SETTINGS_LOG")"
+rm -f "$SETTINGS_LOG"
 APP_PATH="$BUILT_PRODUCTS_DIR/$SCHEME.app"
 [[ -d "$APP_PATH" ]] || fail "Built app not found at $APP_PATH"
 
@@ -218,7 +222,8 @@ BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString'
 
 # Confirm the bundle is actually Developer ID signed (not ad-hoc)
 if [[ "$DRY_RUN" -eq 0 ]]; then
-    SIG_AUTHORITY="$(codesign -dvv "$APP_PATH" 2>&1 | awk -F'=' '/^Authority=/{print $2; exit}')"
+    SIG_OUTPUT="$(codesign -dvv "$APP_PATH" 2>&1 || true)"
+    SIG_AUTHORITY="$(printf '%s\n' "$SIG_OUTPUT" | awk -F'=' '/^Authority=/{print $2; exit}')"
     [[ "$SIG_AUTHORITY" == "$SIGN_IDENTITY: "* ]] || fail "Bundle signed by '$SIG_AUTHORITY', expected '$SIGN_IDENTITY: ...'"
 fi
 

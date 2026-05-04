@@ -7,12 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10001 /* ClaudeUsageBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20001; };
-		A10002 /* MenuBarLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20002; };
-		A10003 /* UsagePopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20003; };
-		A10004 /* UsageModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20004; };
-		A10005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20005; };
-		A10006 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007; };
+		A10001 /* ClaudeUsageBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20001 /* ClaudeUsageBarApp.swift */; };
+		A10002 /* MenuBarLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20002 /* MenuBarLabel.swift */; };
+		A10003 /* UsagePopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20003 /* UsagePopoverView.swift */; };
+		A10004 /* UsageModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20004 /* UsageModel.swift */; };
+		A10005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20005 /* Assets.xcassets */; };
+		A10006 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007 /* UpdateManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -281,7 +281,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
 	};
 	rootObject = A90001 /* Project object */;
 }

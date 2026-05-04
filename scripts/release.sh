@@ -8,13 +8,19 @@
 #   scripts/release.sh 1.5.2 --notes-file /tmp/notes.md
 #
 # Steps:
-#   1. Pre-flight: clean tree, on main, in sync with origin, tag doesn't exist, gh authed.
+#   1. Pre-flight: clean tree, on main, in sync with origin, tag doesn't exist, gh authed,
+#      Developer ID cert present, notary keychain profile configured.
 #   2. Bump MARKETING_VERSION (Debug + Release) in project.pbxproj.
-#   3. Build a universal Release binary with xcodebuild.
+#   3. Build a universal Release binary signed with Developer ID + hardened runtime + secure timestamp.
 #   4. Resolve the built .app via -showBuildSettings (no DerivedData wildcard).
-#   5. Pack it into dist/ClaudeUsageBar.zip with `ditto --keepParent` (preserves bundle).
-#   6. Commit the version bump, push main, create the GitHub release with the zip attached.
-#   7. Redeploy to /Applications and relaunch (skip with --no-redeploy).
+#   5. Notarize via xcrun notarytool, then staple the ticket to the .app.
+#   6. Pack the stapled bundle into dist/ClaudeUsageBar.zip with `ditto --keepParent`.
+#   7. Commit the version bump, push main, create the GitHub release with the zip attached.
+#   8. Redeploy to /Applications and relaunch (skip with --no-redeploy).
+#
+# One-time setup (before first run):
+#   xcrun notarytool store-credentials "ClaudeUsageBar-Notary" \
+#       --apple-id <your-apple-id> --team-id V9YWH29X5V
 
 set -euo pipefail
 
@@ -26,7 +32,7 @@ warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 fail() { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -69,6 +75,9 @@ ASSET_NAME="ClaudeUsageBar.zip"
 DIST_DIR="$ROOT/dist"
 ZIP_PATH="$DIST_DIR/$ASSET_NAME"
 INSTALLED_APP="/Applications/ClaudeUsageBar.app"
+TEAM_ID="V9YWH29X5V"
+SIGN_IDENTITY="Developer ID Application"
+NOTARY_PROFILE="ClaudeUsageBar-Notary"
 
 run() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -85,10 +94,19 @@ log "Pre-flight checks"
 command -v gh >/dev/null      || fail "gh CLI not installed"
 command -v xcodebuild >/dev/null || fail "xcodebuild not on PATH"
 command -v ditto >/dev/null    || fail "ditto missing (should ship with macOS)"
+command -v xcrun >/dev/null    || fail "xcrun missing (install Xcode command line tools)"
 
 [[ -f "$PBXPROJ" ]] || fail "Cannot find $PBXPROJ — run from the repo root."
 
 gh auth status >/dev/null 2>&1 || fail "gh is not authenticated. Run: gh auth login"
+
+if ! security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY: .*($TEAM_ID)"; then
+    fail "Signing identity '$SIGN_IDENTITY' for team $TEAM_ID not found in keychain."
+fi
+
+if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+    fail "Notary keychain profile '$NOTARY_PROFILE' missing. Set up with: xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <id> --team-id $TEAM_ID"
+fi
 
 CURRENT_BRANCH="$(git symbolic-ref --short HEAD)"
 [[ "$CURRENT_BRANCH" == "main" ]] || fail "Not on main (on '$CURRENT_BRANCH')."
@@ -173,9 +191,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
         -configuration Release \
         ONLY_ACTIVE_ARCH=NO \
         ARCHS="arm64 x86_64" \
-        CODE_SIGN_IDENTITY="-" \
-        CODE_SIGNING_REQUIRED=NO \
-        CODE_SIGNING_ALLOWED=NO \
+        CODE_SIGN_STYLE=Manual \
+        CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+        DEVELOPMENT_TEAM="$TEAM_ID" \
+        OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
         build > "$BUILD_LOG" 2>&1; then
         warn "Build failed — last 40 lines:"
         tail -40 "$BUILD_LOG" >&2
@@ -196,6 +215,46 @@ APP_PATH="$BUILT_PRODUCTS_DIR/$SCHEME.app"
 # Confirm the bundle's version actually matches what we asked for
 BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
 [[ "$BUNDLE_VERSION" == "$VERSION" ]] || fail "Built bundle reports v$BUNDLE_VERSION, expected v$VERSION"
+
+# Confirm the bundle is actually Developer ID signed (not ad-hoc)
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    SIG_AUTHORITY="$(codesign -dvv "$APP_PATH" 2>&1 | awk -F'=' '/^Authority=/{print $2; exit}')"
+    [[ "$SIG_AUTHORITY" == "$SIGN_IDENTITY: "* ]] || fail "Bundle signed by '$SIG_AUTHORITY', expected '$SIGN_IDENTITY: ...'"
+fi
+
+# ---------- notarize ----------
+
+log "Notarizing $APP_PATH (profile: $NOTARY_PROFILE)"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    NOTARY_DIR="$(mktemp -d -t claudeusagebar-notary)"
+    NOTARY_ZIP="$NOTARY_DIR/ClaudeUsageBar.zip"
+    ( cd "$BUILT_PRODUCTS_DIR" && /usr/bin/ditto -c -k --keepParent "$SCHEME.app" "$NOTARY_ZIP" )
+
+    log "  Uploading to Apple notary service (this can take a few minutes)..."
+    NOTARY_LOG="$NOTARY_DIR/submit.log"
+    if ! xcrun notarytool submit "$NOTARY_ZIP" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        --wait > "$NOTARY_LOG" 2>&1; then
+        warn "Notarization failed. Submission output:"
+        cat "$NOTARY_LOG" >&2
+        SUBMISSION_ID="$(awk '/^[[:space:]]*id:/{print $2; exit}' "$NOTARY_LOG")"
+        if [[ -n "$SUBMISSION_ID" ]]; then
+            warn "Detailed log for submission $SUBMISSION_ID:"
+            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" >&2 || true
+        fi
+        rm -rf "$NOTARY_DIR"
+        fail "Notarization rejected by Apple."
+    fi
+    cat "$NOTARY_LOG"
+    rm -rf "$NOTARY_DIR"
+
+    log "  Stapling notarization ticket to bundle"
+    xcrun stapler staple "$APP_PATH"
+
+    log "  Verifying signature + notarization"
+    xcrun stapler validate "$APP_PATH"
+    spctl --assess --verbose=2 --type execute "$APP_PATH"
+fi
 
 # ---------- package ----------
 

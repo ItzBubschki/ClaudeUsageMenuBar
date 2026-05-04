@@ -194,6 +194,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
         CODE_SIGN_STYLE=Manual \
         CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
         DEVELOPMENT_TEAM="$TEAM_ID" \
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
         OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
         build > "$BUILD_LOG" 2>&1; then
         warn "Build failed — last 40 lines:"
@@ -237,12 +238,18 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 
     log "  Uploading to Apple notary service (this can take a few minutes)..."
     NOTARY_LOG="$NOTARY_DIR/submit.log"
-    if ! xcrun notarytool submit "$NOTARY_ZIP" \
+    # notarytool returns 0 even when Apple's *result* is "Invalid", so we have
+    # to inspect the printed status, not just the exit code.
+    xcrun notarytool submit "$NOTARY_ZIP" \
         --keychain-profile "$NOTARY_PROFILE" \
-        --wait > "$NOTARY_LOG" 2>&1; then
-        warn "Notarization failed. Submission output:"
-        cat "$NOTARY_LOG" >&2
-        SUBMISSION_ID="$(awk '/^[[:space:]]*id:/{print $2; exit}' "$NOTARY_LOG")"
+        --wait > "$NOTARY_LOG" 2>&1 || true
+    cat "$NOTARY_LOG"
+
+    NOTARY_STATUS="$(awk '/^[[:space:]]*status:/{s=$2} END{print s}' "$NOTARY_LOG")"
+    SUBMISSION_ID="$(awk '/^[[:space:]]*id:/{print $2; exit}' "$NOTARY_LOG")"
+
+    if [[ "$NOTARY_STATUS" != "Accepted" ]]; then
+        warn "Notarization failed (status: ${NOTARY_STATUS:-unknown})"
         if [[ -n "$SUBMISSION_ID" ]]; then
             warn "Detailed log for submission $SUBMISSION_ID:"
             xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" >&2 || true
@@ -250,7 +257,6 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
         rm -rf "$NOTARY_DIR"
         fail "Notarization rejected by Apple."
     fi
-    cat "$NOTARY_LOG"
     rm -rf "$NOTARY_DIR"
 
     log "  Stapling notarization ticket to bundle"

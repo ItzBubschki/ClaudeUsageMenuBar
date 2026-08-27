@@ -138,7 +138,12 @@ log "Current version: $CURRENT_VERSION  →  new version: $VERSION"
 # ---------- notes ----------
 
 NOTES_PATH=""
-cleanup_notes() { [[ -n "$NOTES_PATH" && -f "$NOTES_PATH" ]] && rm -f "$NOTES_PATH" || true; }
+# KEEP_NOTES guards a caller-supplied --notes-file: only the temp file this script
+# creates for --notes (or for the $EDITOR flow) may be deleted on exit.
+KEEP_NOTES=0
+cleanup_notes() {
+    [[ "$KEEP_NOTES" -eq 0 && -n "$NOTES_PATH" && -f "$NOTES_PATH" ]] && rm -f "$NOTES_PATH" || true
+}
 trap cleanup_notes EXIT
 
 if [[ -n "$NOTES_FILE" ]]; then
@@ -215,11 +220,19 @@ xcodebuild \
 BUILT_PRODUCTS_DIR="$(awk '/ BUILT_PRODUCTS_DIR = /{print $3; exit}' "$SETTINGS_LOG")"
 rm -f "$SETTINGS_LOG"
 APP_PATH="$BUILT_PRODUCTS_DIR/$SCHEME.app"
-[[ -d "$APP_PATH" ]] || fail "Built app not found at $APP_PATH"
 
-# Confirm the bundle's version actually matches what we asked for
-BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
-[[ "$BUNDLE_VERSION" == "$VERSION" ]] || fail "Built bundle reports v$BUNDLE_VERSION, expected v$VERSION"
+# A dry run bumps nothing and builds nothing, so whatever sits in BUILT_PRODUCTS_DIR is a
+# leftover from an earlier build and still carries the old version. Asserting against it
+# would make --dry-run fail every time.
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    [[ -d "$APP_PATH" ]] || fail "Built app not found at $APP_PATH"
+
+    # Confirm the bundle's version actually matches what we asked for
+    BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
+    [[ "$BUNDLE_VERSION" == "$VERSION" ]] || fail "Built bundle reports v$BUNDLE_VERSION, expected v$VERSION"
+else
+    log "(dry run) would verify $APP_PATH reports v$VERSION"
+fi
 
 # Confirm the bundle is actually Developer ID signed (not ad-hoc)
 if [[ "$DRY_RUN" -eq 0 ]]; then

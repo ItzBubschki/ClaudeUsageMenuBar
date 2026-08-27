@@ -9,6 +9,38 @@ private struct TokenResult {
     let expiresAt: Date?
 }
 
+/// One token found in a credential blob, with the metadata used to rank it.
+///
+/// A credential blob routinely holds several tokens for different accounts,
+/// clients, and scope sets — some of them long expired. Ranking them explicitly
+/// keeps selection deterministic; iterating a `Dictionary` and taking the first
+/// match does not, because Swift randomizes dictionary order per process.
+private struct TokenCandidate {
+    let token: String
+    let expiresAt: Date?
+    /// The JSON key this came from, or "" for a root-level token.
+    let sourceKey: String
+    /// Whether the credential advertises the `user:profile` scope the usage API needs.
+    let hasProfileScope: Bool
+
+    /// Expired tokens are still returned as a last resort — a 401 with a clear
+    /// error beats silently having no token at all — but they rank below every
+    /// live one. A missing expiry counts as live, since we cannot prove otherwise.
+    var isExpired: Bool {
+        guard let expiresAt = expiresAt else { return false }
+        return expiresAt <= Date()
+    }
+
+    /// Sort key, highest first: usable scope, then not expired, then furthest expiry.
+    /// Scope outranks freshness because the usage API rejects a token without
+    /// `user:profile` no matter how fresh it is.
+    var rank: (Int, Int, TimeInterval) {
+        (hasProfileScope ? 1 : 0,
+         isExpired ? 0 : 1,
+         expiresAt?.timeIntervalSince1970 ?? 0)
+    }
+}
+
 class UsageModel: ObservableObject {
     @Published var usagePercent: Double = 0.0        // 0–100 (5h window)
     @Published var fiveHourResetsAt: Date?           // absolute time of 5h reset
@@ -97,6 +129,7 @@ class UsageModel: ObservableObject {
 
         guard var tokenData = Self.getOAuthTokenData(forceRefresh: forceTokenRefresh) else {
             DispatchQueue.main.async {
+                AppLog.auth.error("aborting usage fetch: could not read a token from the Keychain")
                 self.lastError = "Could not read token from Keychain"
                 self.finishRefreshing()
             }
@@ -133,19 +166,24 @@ class UsageModel: ObservableObject {
                 defer { self?.finishRefreshing() }
 
                 if let error = error {
+                    AppLog.api.error("usage request failed: \(error.localizedDescription, privacy: .public)")
                     self?.lastError = error.localizedDescription
                     return
                 }
 
                 guard let data = data else {
+                    AppLog.api.error("usage request returned no data")
                     self?.lastError = "No data received"
                     return
                 }
 
                 guard let httpResponse = response as? HTTPURLResponse else {
+                    AppLog.api.error("usage request returned a non-HTTP response")
                     self?.lastError = "Invalid response"
                     return
                 }
+
+                AppLog.api.notice("usage response: HTTP \(httpResponse.statusCode, privacy: .public) (\(data.count, privacy: .public) bytes)")
 
                 if httpResponse.statusCode == 429 {
                     // First 429 with a possibly-stale cached token: drop the cache and
@@ -166,6 +204,7 @@ class UsageModel: ObservableObject {
 
                 // On 401/403, invalidate cached token and retry once from source
                 if [401, 403].contains(httpResponse.statusCode) && !forceTokenRefresh {
+                    AppLog.api.notice("HTTP \(httpResponse.statusCode, privacy: .public): dropping the cached token and retrying once from source")
                     Self.deleteCachedToken()
                     self?.finishRefreshing()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -181,12 +220,16 @@ class UsageModel: ObservableObject {
                 self?.consecutiveRateLimits = 0
 
                 guard (200...299).contains(httpResponse.statusCode) else {
+                    if [401, 403].contains(httpResponse.statusCode) {
+                        AppLog.api.error("HTTP \(httpResponse.statusCode, privacy: .public) again after a fresh token — the stored credential is being rejected; sign in to Claude Code again")
+                    }
                     self?.lastError = "HTTP \(httpResponse.statusCode)"
                     return
                 }
 
                 do {
                     let usage = try UsageResponse.decoder.decode(UsageResponse.self, from: data)
+                    AppLog.api.notice("usage ok: 5h=\(Int(usage.fiveHour.utilization), privacy: .public)% 7d=\(Int(usage.sevenDay.utilization), privacy: .public)%")
                     self?.lastError = nil
 
                     self?.usagePercent = usage.fiveHour.utilization
@@ -197,6 +240,7 @@ class UsageModel: ObservableObject {
                     self?.weeklyUsagePercent = usage.sevenDay.utilization
                     self?.sevenDayResetsAt = usage.sevenDay.resetsAt
                 } catch {
+                    AppLog.api.error("failed to decode usage response: \(String(describing: error), privacy: .public)")
                     self?.lastError = "Failed to parse usage data"
                 }
             }
@@ -228,6 +272,7 @@ class UsageModel: ObservableObject {
             delay = min(30.0 * pow(2.0, Double(consecutiveRateLimits - 1)), 600)
         }
 
+        AppLog.api.notice("rate limited (\(self.consecutiveRateLimits, privacy: .public) consecutive), retrying in \(Int(delay), privacy: .public)s, Retry-After=\(retryAfterHeader ?? "none", privacy: .public)")
         lastError = "Rate limited, retrying in \(Int(delay))s"
 
         rateLimitRetryTask?.cancel()
@@ -245,11 +290,31 @@ class UsageModel: ObservableObject {
     private static func getOAuthTokenData(forceRefresh: Bool = false) -> Data? {
         // Check cached token first (unless forced refresh)
         if !forceRefresh, let cached = readCachedToken(), !isCacheExpired() {
+            // .info rather than .debug: debug-level messages are not persisted to the
+            // unified log, so they would be missing from a log collected off a user's machine.
+            AppLog.auth.info("using cached token (len=\(cached.count, privacy: .public), cache expires \(AppLog.describe(Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: cachedTokenExpiryKey))), privacy: .public))")
             return cached
         }
+        // CLAUDEUSAGEBAR_TOKEN_SOURCE=code|desktop restricts which credential store is
+        // consulted. Claude Code normally wins, which makes the desktop path impossible
+        // to exercise on a machine that has both — set it to isolate one source when
+        // diagnosing a report. Unset (or "auto") keeps the normal order.
+        let sourcePreference = ProcessInfo.processInfo.environment["CLAUDEUSAGEBAR_TOKEN_SOURCE"]?.lowercased()
+        if let sourcePreference = sourcePreference, sourcePreference != "auto" {
+            AppLog.auth.notice("token source restricted to '\(sourcePreference, privacy: .public)' by CLAUDEUSAGEBAR_TOKEN_SOURCE")
+        }
+        AppLog.auth.info("reading token from source (forceRefresh=\(forceRefresh, privacy: .public))")
 
         // Read from source (may trigger Keychain password prompt)
-        guard let result = getClaudeCodeTokenWithExpiry() ?? getClaudeDesktopTokenWithExpiry() else {
+        var result: TokenResult?
+        if sourcePreference != "desktop" {
+            result = getClaudeCodeTokenWithExpiry()
+        }
+        if result == nil, sourcePreference != "code" {
+            result = getClaudeDesktopTokenWithExpiry()
+        }
+        guard let result = result else {
+            AppLog.auth.error("no token available from Claude Code or Claude desktop")
             return nil
         }
 
@@ -315,121 +380,277 @@ class UsageModel: ObservableObject {
     }
 
     /// Reads the OAuth token and expiry from the Claude Code keychain entry.
+    ///
+    /// Several items can share this service name (a leftover from a previous
+    /// account, or a second login keychain), so every match is considered rather
+    /// than whichever one the Keychain happens to return first.
     private static func getClaudeCodeTokenWithExpiry() -> TokenResult? {
-        guard let data = readKeychainItem(service: "Claude Code-credentials") else {
+        let items = readKeychainItems(service: "Claude Code-credentials")
+        guard !items.isEmpty else {
+            AppLog.auth.notice("claude-code: no 'Claude Code-credentials' keychain item")
             return nil
         }
-        return extractAccessTokenWithExpiry(from: data)
+        if items.count > 1 {
+            AppLog.auth.notice("claude-code: \(items.count, privacy: .public) keychain items share this service name; ranking tokens from all of them")
+        }
+
+        let results = items.enumerated().compactMap { index, data in
+            extractAccessTokenWithExpiry(from: data, source: "claude-code[\(index)]")
+        }
+        return bestOf(results, source: "claude-code")
     }
 
     /// Reads and decrypts the OAuth token and expiry from the Claude desktop app.
+    ///
+    /// Recent desktop builds write `oauth:tokenCacheV2` and leave the older
+    /// `oauth:tokenCache` behind un-refreshed, so V2 is tried first and V1 is only
+    /// a fallback for older installs.
     private static func getClaudeDesktopTokenWithExpiry() -> TokenResult? {
         // Read the encryption key from keychain
-        guard let encryptionKey = readKeychainItem(service: "Claude Safe Storage") else {
+        guard let encryptionKey = readKeychainItems(service: "Claude Safe Storage").first else {
+            AppLog.auth.notice("claude-desktop: no 'Claude Safe Storage' keychain item")
             return nil
         }
 
         // Read the encrypted token cache from config.json
         let configPath = NSHomeDirectory() + "/Library/Application Support/Claude/config.json"
-        guard let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-              let tokenCacheB64 = config["oauth:tokenCache"] as? String,
-              let encryptedData = Data(base64Encoded: tokenCacheB64) else {
+        guard let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath)) else {
+            AppLog.auth.notice("claude-desktop: config.json not readable")
             return nil
         }
-
-        // Verify Electron safeStorage v10 format: "v10" prefix
-        guard encryptedData.count > 19,
-              encryptedData[0] == 0x76, encryptedData[1] == 0x31, encryptedData[2] == 0x30 else {
+        guard let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
+            AppLog.auth.error("claude-desktop: config.json is not a JSON object")
             return nil
         }
-
-        // Skip the "v10" prefix (3 bytes), rest is ciphertext
-        let ciphertext = encryptedData[3...]
 
         // Derive AES key using PBKDF2-SHA1 (Chromium convention)
         guard let keyString = String(data: encryptionKey, encoding: .utf8),
               let aesKey = deriveKey(password: Data(keyString.utf8), salt: Data("saltysalt".utf8), iterations: 1003, keyLength: 16) else {
+            AppLog.auth.error("claude-desktop: could not derive the AES key from the Safe Storage secret")
             return nil
         }
 
-        // Decrypt using AES-128-CBC with space-filled IV (Chromium v10 on macOS)
-        guard let decrypted = decryptAESCBC(key: aesKey, iv: Data(repeating: 0x20, count: 16), data: Data(ciphertext)) else {
-            return nil
+        let cacheKeys = ["oauth:tokenCacheV2", "oauth:tokenCache"]
+        AppLog.auth.info("claude-desktop: config.json present, caches=\(cacheKeys.filter { config[$0] != nil }.joined(separator: ","), privacy: .public)")
+
+        let results = cacheKeys.compactMap { cacheKey -> TokenResult? in
+            guard let tokenCacheB64 = config[cacheKey] as? String,
+                  let encryptedData = Data(base64Encoded: tokenCacheB64) else {
+                return nil
+            }
+
+            // Verify Electron safeStorage v10 format: "v10" prefix
+            guard encryptedData.count > 19,
+                  encryptedData[0] == 0x76, encryptedData[1] == 0x31, encryptedData[2] == 0x30 else {
+                AppLog.auth.error("claude-desktop: \(cacheKey, privacy: .public) is not safeStorage v10 format (\(encryptedData.count, privacy: .public) bytes)")
+                return nil
+            }
+
+            // Skip the "v10" prefix (3 bytes), rest is ciphertext
+            let ciphertext = encryptedData[3...]
+
+            // Decrypt using AES-128-CBC with space-filled IV (Chromium v10 on macOS)
+            guard let decrypted = decryptAESCBC(key: aesKey, iv: Data(repeating: 0x20, count: 16), data: Data(ciphertext)) else {
+                AppLog.auth.error("claude-desktop: \(cacheKey, privacy: .public) failed to decrypt")
+                return nil
+            }
+
+            return extractAccessTokenWithExpiry(from: decrypted, source: "claude-desktop/\(cacheKey)")
         }
 
-        return extractAccessTokenWithExpiry(from: decrypted)
+        return bestOf(results, source: "claude-desktop")
     }
 
-    /// Reads a generic password from the keychain.
-    private static func readKeychainItem(service: String) -> Data? {
-        let query: [String: Any] = [
+    /// Picks a token across several credential blobs, which are passed in preference
+    /// order (the store the vendor actively refreshes first).
+    ///
+    /// The first blob yielding a live token wins. Expiry is *not* used to choose
+    /// between blobs: a superseded store can hold tokens with a far-future expiry
+    /// that the server has already revoked, so a distant expiry there is not evidence
+    /// of validity. Only when every blob is expired does the furthest one win, as a
+    /// best effort before the 401 path takes over.
+    private static func bestOf(_ results: [TokenResult], source: String) -> TokenResult? {
+        guard !results.isEmpty else {
+            AppLog.auth.notice("\(source, privacy: .public): no usable token")
+            return nil
+        }
+
+        let now = Date()
+        if let live = results.first(where: { ($0.expiresAt ?? .distantFuture) > now }) {
+            if results.count > 1 {
+                AppLog.auth.notice("\(source, privacy: .public): using the first live token of \(results.count, privacy: .public) blob(s), expires=\(AppLog.describe(live.expiresAt), privacy: .public)")
+            }
+            return live
+        }
+
+        let newest = results.max(by: { lhs, rhs in
+            (lhs.expiresAt?.timeIntervalSince1970 ?? 0) < (rhs.expiresAt?.timeIntervalSince1970 ?? 0)
+        })
+        AppLog.auth.error("\(source, privacy: .public): all \(results.count, privacy: .public) blob(s) are expired; using the newest (\(AppLog.describe(newest?.expiresAt), privacy: .public))")
+        return newest
+    }
+
+    /// Reads every generic password matching a service name from the keychain.
+    ///
+    /// Returns all matches rather than one, because duplicate items under the same
+    /// service name are common and `kSecMatchLimitOne` picks among them arbitrarily.
+    private static func readKeychainItems(service: String) -> [Data] {
+        // The macOS login keychain rejects kSecMatchLimitAll combined with
+        // kSecReturnData (errSecParam, -50) whether or not kSecReturnAttributes is
+        // also set. So the matching accounts are listed first, then each item's data
+        // is fetched with its own single-item query.
+        let listQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+
+        var listResult: AnyObject?
+        let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listResult)
+
+        guard listStatus == errSecSuccess, let entries = listResult as? [[String: Any]] else {
+            if listStatus != errSecItemNotFound {
+                let message = SecCopyErrorMessageString(listStatus, nil) as String? ?? "unknown"
+                AppLog.auth.error("keychain enumeration failed for '\(service, privacy: .public)': OSStatus \(listStatus, privacy: .public) (\(message, privacy: .public))")
+                // Fall back to a plain single-item read, which some keychain
+                // configurations accept even when enumeration does not.
+                if let single = readKeychainData(service: service, account: nil) {
+                    return [single]
+                }
+            }
+            return []
+        }
+
+        // Distinct accounts only: two items sharing a service *and* account are
+        // indistinguishable to a fetch, so one read covers them.
+        var accounts: [String?] = []
+        for entry in entries {
+            let account = entry[kSecAttrAccount as String] as? String
+            if !accounts.contains(where: { $0 == account }) {
+                accounts.append(account)
+            }
+        }
+
+        let items = accounts.compactMap { readKeychainData(service: service, account: $0) }
+        if items.count != entries.count {
+            AppLog.auth.notice("keychain '\(service, privacy: .public)': \(entries.count, privacy: .public) item(s) matched, \(items.count, privacy: .public) readable")
+        }
+        return items
+    }
+
+    /// Fetches the data of a single keychain item, optionally narrowed by account.
+    private static func readKeychainData(service: String, account: String?) -> Data? {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        if let account = account {
+            query[kSecAttrAccount as String] = account
+        }
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
         guard status == errSecSuccess, let data = result as? Data else {
+            if status != errSecItemNotFound {
+                let message = SecCopyErrorMessageString(status, nil) as String? ?? "unknown"
+                AppLog.auth.error("keychain read failed for '\(service, privacy: .public)': OSStatus \(status, privacy: .public) (\(message, privacy: .public))")
+            }
             return nil
         }
         return data
     }
 
-    /// Extracts the accessToken and optional expiry from a JSON blob (as Data).
-    private static func extractAccessTokenWithExpiry(from data: Data) -> TokenResult? {
+    /// Reads a single generic password from the keychain (used for our own cache entry,
+    /// which this app is the only writer of).
+    private static func readKeychainItem(service: String) -> Data? {
+        return readKeychainItems(service: service).first
+    }
+
+    /// Extracts the best usable access token and its expiry from a JSON blob (as Data).
+    ///
+    /// A blob can hold many tokens keyed by account, client, and scope set. They are
+    /// all collected, then ranked by `TokenCandidate.rank` so the choice is stable
+    /// across launches and prefers a live `user:profile` token over an expired one.
+    private static func extractAccessTokenWithExpiry(from data: Data, source: String) -> TokenResult? {
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard !raw.isEmpty,
               let jsonData = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            AppLog.auth.error("\(source, privacy: .public): credential blob is not a JSON object (\(data.count, privacy: .public) bytes)")
             return nil
         }
 
-        // Direct: {"accessToken": "...", "expiresAt": "..."} or {"token": "..."}
-        if let token = json["accessToken"] as? String {
-            let expiry = parseExpiry(from: json)
-            return TokenResult(token: Data(token.utf8), expiresAt: expiry)
+        let candidates = collectCandidates(from: json)
+        guard !candidates.isEmpty else {
+            AppLog.auth.error("\(source, privacy: .public): no token field found in credential JSON (keys=\(json.keys.count, privacy: .public))")
+            return nil
         }
-        if let token = json["token"] as? String {
-            let expiry = parseExpiry(from: json)
-            return TokenResult(token: Data(token.utf8), expiresAt: expiry)
+
+        // Sort descending by rank, with the source key as a deterministic tie-break
+        // so two equally-ranked candidates never alternate between launches.
+        let sorted = candidates.sorted { lhs, rhs in
+            if lhs.rank != rhs.rank { return lhs.rank > rhs.rank }
+            return lhs.sourceKey < rhs.sourceKey
+        }
+
+        AppLog.auth.info("\(source, privacy: .public): \(sorted.count, privacy: .public) token candidate(s)")
+        for candidate in sorted {
+            AppLog.auth.info(
+                "  candidate scopes=\(AppLog.scopeSummary(fromKey: candidate.sourceKey), privacy: .public) profile=\(candidate.hasProfileScope, privacy: .public) expired=\(candidate.isExpired, privacy: .public) expires=\(AppLog.describe(candidate.expiresAt), privacy: .public) len=\(candidate.token.count, privacy: .public) key=\(candidate.sourceKey, privacy: .private)"
+            )
+        }
+
+        let best = sorted[0]
+        if !best.hasProfileScope {
+            AppLog.auth.error("\(source, privacy: .public): selected token lacks the user:profile scope — the usage API will reject it")
+        }
+        if best.isExpired {
+            AppLog.auth.error("\(source, privacy: .public): every candidate is expired; using the newest (expired \(AppLog.describe(best.expiresAt), privacy: .public)) — sign in again to refresh")
+        }
+        AppLog.auth.notice("\(source, privacy: .public): selected token scopes=\(AppLog.scopeSummary(fromKey: best.sourceKey), privacy: .public) expires=\(AppLog.describe(best.expiresAt), privacy: .public)")
+
+        return TokenResult(token: Data(best.token.utf8), expiresAt: best.expiresAt)
+    }
+
+    /// Gathers every token in a credential JSON object, at the root and one level down.
+    private static func collectCandidates(from json: [String: Any]) -> [TokenCandidate] {
+        var candidates: [TokenCandidate] = []
+
+        /// Reads a token out of one credential dictionary. `key` is "" at the root.
+        func candidate(from dict: [String: Any], key: String) -> TokenCandidate? {
+            guard let token = (dict["accessToken"] as? String) ?? (dict["token"] as? String),
+                  !token.isEmpty else {
+                return nil
+            }
+            // The scope can live in the key (Claude desktop packs it into the
+            // composite cache key) or in a `scopes` array on the value itself
+            // (Claude Code's credential format).
+            let scopesInValue = (dict["scopes"] as? [String]) ?? []
+            let hasProfileScope = key.contains("user:profile") || scopesInValue.contains("user:profile")
+            return TokenCandidate(token: token,
+                                  expiresAt: parseExpiry(from: dict),
+                                  sourceKey: key,
+                                  hasProfileScope: hasProfileScope)
+        }
+
+        // Direct: {"accessToken": "...", "expiresAt": "..."} or {"token": "..."}
+        if let root = candidate(from: json, key: "") {
+            candidates.append(root)
         }
 
         // Nested: {"someKey": {"accessToken": "..."}} or {"someKey": {"token": "..."}}
-        // Prefer keys containing "user:profile" scope (needed for the usage API)
-        var fallbackToken: String?
-        var fallbackExpiry: Date?
         for (key, value) in json {
-            if let nested = value as? [String: Any] {
-                if let token = nested["accessToken"] as? String {
-                    if key.contains("user:profile") {
-                        return TokenResult(token: Data(token.utf8), expiresAt: parseExpiry(from: nested))
-                    }
-                    if fallbackToken == nil {
-                        fallbackToken = token
-                        fallbackExpiry = parseExpiry(from: nested)
-                    }
-                }
-                if let token = nested["token"] as? String {
-                    if key.contains("user:profile") {
-                        return TokenResult(token: Data(token.utf8), expiresAt: parseExpiry(from: nested))
-                    }
-                    if fallbackToken == nil {
-                        fallbackToken = token
-                        fallbackExpiry = parseExpiry(from: nested)
-                    }
-                }
+            if let nested = value as? [String: Any], let found = candidate(from: nested, key: key) {
+                candidates.append(found)
             }
         }
-        if let token = fallbackToken {
-            return TokenResult(token: Data(token.utf8), expiresAt: fallbackExpiry)
-        }
 
-        return nil
+        return candidates
     }
 
     /// Parses an expiry date from a credential JSON dictionary.

@@ -13,6 +13,7 @@
 		A10004 /* UsageModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20004 /* UsageModel.swift */; };
 		A10005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20005 /* Assets.xcassets */; };
 		A10006 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007 /* UpdateManager.swift */; };
+		A10007 /* Logging.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20008 /* Logging.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -23,6 +24,7 @@
 		A20005 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A20006 /* ClaudeUsageBar.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ClaudeUsageBar.entitlements; sourceTree = "<group>"; };
 		A20007 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
+		A20008 /* Logging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logging.swift; sourceTree = "<group>"; };
 		A30001 /* ClaudeUsageBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClaudeUsageBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -53,6 +55,7 @@
 				A20002 /* MenuBarLabel.swift */,
 				A20003 /* UsagePopoverView.swift */,
 				A20007 /* UpdateManager.swift */,
+				A20008 /* Logging.swift */,
 				A20005 /* Assets.xcassets */,
 				A20006 /* ClaudeUsageBar.entitlements */,
 			);
@@ -141,6 +144,7 @@
 				A10003 /* UsagePopoverView.swift in Sources */,
 				A10004 /* UsageModel.swift in Sources */,
 				A10006 /* UpdateManager.swift in Sources */,
+				A10007 /* Logging.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -230,7 +234,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MARKETING_VERSION = 1.6.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.itzbubschki.ClaudeUsageMenuBar;
+				PRODUCT_BUNDLE_IDENTIFIER = com.itzbubschki.ClaudeUsageMenuBar.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

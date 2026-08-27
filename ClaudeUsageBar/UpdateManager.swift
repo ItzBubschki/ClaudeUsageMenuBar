@@ -41,6 +41,7 @@ class UpdateManager: NSObject, ObservableObject {
                 guard let self = self else { return }
 
                 if let error = error {
+                    AppLog.update.error("update check failed: \(error.localizedDescription, privacy: .public)")
                     self.updateError = "Update check failed: \(error.localizedDescription)"
                     return
                 }
@@ -59,7 +60,10 @@ class UpdateManager: NSObject, ObservableObject {
                 }
 
                 guard (200...299).contains(httpResponse.statusCode),
-                      let data = data else { return }
+                      let data = data else {
+                    AppLog.update.error("update check: HTTP \(httpResponse.statusCode, privacy: .public) from the GitHub releases API")
+                    return
+                }
 
                 do {
                     let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
@@ -68,6 +72,8 @@ class UpdateManager: NSObject, ObservableObject {
                         : release.tagName
 
                     let localVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
+
+                    AppLog.update.notice("update check: local=\(localVersion, privacy: .public) latest=\(remoteVersion, privacy: .public)")
 
                     if Self.isNewerVersion(remoteVersion, than: localVersion) {
                         self.latestVersion = remoteVersion
@@ -81,7 +87,8 @@ class UpdateManager: NSObject, ObservableObject {
                         self.latestVersion = nil
                     }
                 } catch {
-                    // Silently fail — don't bother user with update check errors
+                    // Silently fail in the UI — but leave a trace in the log.
+                    AppLog.update.error("update check: failed to decode the GitHub release: \(String(describing: error), privacy: .public)")
                 }
             }
         }.resume()
@@ -107,6 +114,7 @@ class UpdateManager: NSObject, ObservableObject {
 
     func downloadUpdate() {
         guard let downloadURL = downloadURL else {
+            AppLog.update.error("install requested but the release has no .zip asset")
             updateError = "No download URL available"
             return
         }
@@ -126,6 +134,13 @@ class UpdateManager: NSObject, ObservableObject {
 
     private func installFromZip(at zipURL: URL) {
         let fm = FileManager.default
+        let bundlePath = Bundle.main.bundlePath
+        AppLog.update.notice("installing update over \(bundlePath, privacy: .public)")
+        if bundlePath.contains("/AppTranslocation/") {
+            AppLog.update.error("bundle is translocated (read-only); the install will fail — move the app to /Applications and relaunch")
+        } else if !fm.isWritableFile(atPath: (bundlePath as NSString).deletingLastPathComponent) {
+            AppLog.update.error("parent directory of the bundle is not writable; the install will fail")
+        }
         let tempDir = fm.temporaryDirectory.appendingPathComponent("ClaudeUsageBarUpdate-\(UUID().uuidString)")
 
         do {
@@ -188,6 +203,7 @@ class UpdateManager: NSObject, ObservableObject {
         } catch {
             DispatchQueue.main.async {
                 self.isDownloading = false
+                AppLog.update.error("install failed: \(String(describing: error), privacy: .public)")
                 self.updateError = "Install failed: \(error.localizedDescription)"
             }
         }
@@ -232,6 +248,7 @@ extension UpdateManager: URLSessionDownloadDelegate {
         if let error = error {
             DispatchQueue.main.async {
                 self.isDownloading = false
+                AppLog.update.error("download failed: \(error.localizedDescription, privacy: .public)")
                 self.updateError = "Download failed: \(error.localizedDescription)"
             }
         }

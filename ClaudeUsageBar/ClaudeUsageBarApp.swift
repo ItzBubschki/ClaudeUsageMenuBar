@@ -6,6 +6,7 @@ struct ClaudeUsageBarApp: App {
     @StateObject private var model = UsageModel()
 
     init() {
+        AppLog.logLaunchContext()
         ProcessInfo.processInfo.disableAutomaticTermination("Menu bar app must stay running")
     }
 
